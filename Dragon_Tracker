@@ -6,7 +6,7 @@
 #include <WiFiClientSecure.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
-#include "secrets.h"
+
 
 // LCD setup
 LiquidCrystal_I2C lcd(0x27, 16, 2);
