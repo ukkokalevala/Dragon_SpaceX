@@ -1,0 +1,166 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <TinyGPS++.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoJson.h>
+#include "secrets.h"
+
+// LCD setup
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// GPS setup
+TinyGPSPlus gps;
+SoftwareSerial gpsSerial(D6, D7);  // RX (D6), TX (D7)
+
+// Wi-Fi credentials
+const char* ssid = "yourSSID";
+const char* password = "yourPASSWORD";
+
+// N2YO API
+String apiKey = "put here your API KEY ";
+String satID = "61791";  // SpaceX Dragon CRS-31 satellite ID
+
+unsigned long lastSwitchTime = 0;
+const unsigned long switchInterval = 3000; // Switch screens every 3 seconds
+int screenState = 0; // 0: Lat/Lon, 1: Distance, 2: Speed
+
+float lastLat = 0.0, lastLon = 0.0, lastDistance = 0.0, lastSpeed = 7.66; // Default speed
+
+void setup() {
+  Serial.begin(115200);
+  gpsSerial.begin(9600);
+
+  // Initialize LCD
+  Wire.begin(D2, D1);
+  lcd.begin(16, 2);
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("CRS SpX-31 Init");
+  delay(2000);
+
+  // Connect to Wi-Fi
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting...");
+  }
+  Serial.println("Connected to WiFi");
+  lcd.clear();
+}
+
+void fetchSatelliteData(float myLat, float myLon) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    String url = "https://api.n2yo.com/rest/v1/satellite/positions/" + satID + "/" + String(myLat, 6) + "/" + String(myLon, 6) + "/0/1/&apiKey=" + apiKey;
+    http.begin(client, url);
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode > 0) {
+      String payload = http.getString();
+      Serial.println("HTTP Response Code: " + String(httpResponseCode));
+      Serial.println("Received Data: " + payload);
+
+      StaticJsonDocument<1024> doc;
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error) {
+        JsonArray positions = doc["positions"];
+        if (positions.size() > 0) {
+          lastLat = positions[0]["satlatitude"] | 0.0;
+          lastLon = positions[0]["satlongitude"] | 0.0;
+          lastSpeed = positions[0]["satvelocity"] | 7.66;  // Use default if unavailable
+          lastDistance = calculateDistance(myLat, myLon, lastLat, lastLon);
+          
+          Serial.print("Latitude: ");
+          Serial.println(lastLat);
+          Serial.print("Longitude: ");
+          Serial.println(lastLon);
+          Serial.print("Speed: ");
+          Serial.println(lastSpeed);
+          Serial.print("Distance: ");
+          Serial.println(lastDistance);
+        } else {
+          Serial.println("No position data found in the response.");
+        }
+      } else {
+        Serial.print("JSON Parsing failed: ");
+        Serial.println(error.c_str());
+      }
+    } else {
+      Serial.print("Error on HTTP request: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  }
+}
+
+float calculateDistance(float lat1, float lon1, float lat2, float lon2) {
+  const float R = 6371.0;
+  float dLat = radians(lat2 - lat1);
+  float dLon = radians(lon2 - lon1);
+  float a = sin(dLat / 2) * sin(dLat / 2) + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLon / 2) * sin(dLon / 2);
+  float c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
+}
+
+void displayData() {
+  lcd.clear();
+  switch (screenState) {
+    case 0:
+      lcd.setCursor(0, 0);
+      lcd.print("Lat: ");
+      lcd.print(lastLat, 2);
+      lcd.setCursor(0, 1);
+      lcd.print("Lon: ");
+      lcd.print(lastLon, 2);
+      break;
+
+    case 1:
+      lcd.setCursor(0, 0);
+      lcd.print("Dist: ");
+      lcd.print(lastDistance, 1);
+      lcd.print(" km");
+      lcd.setCursor(0, 1);
+      lcd.print("To CRS SpX-31");
+      break;
+
+    case 2:
+      lcd.setCursor(0, 0);
+      lcd.print("Speed: ");
+      lcd.print(lastSpeed, 2);
+      lcd.print(" km/s");
+      lcd.setCursor(0, 1);
+      lcd.print("CRS SpX-31");
+      break;
+  }
+}
+
+void loop() {
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+    if (gps.location.isUpdated()) {
+      float myLat = gps.location.lat();
+      float myLon = gps.location.lng();
+      Serial.print("Lat: ");
+      Serial.println(myLat, 6);
+      Serial.print("Lon: ");
+      Serial.println(myLon, 6);
+
+      fetchSatelliteData(myLat, myLon);
+    }
+  }
+
+  if (millis() - lastSwitchTime >= switchInterval) {
+    lastSwitchTime = millis();
+    screenState = (screenState + 1) % 3;
+    displayData();
+  }
+  delay(100);
+}
